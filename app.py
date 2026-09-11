@@ -151,11 +151,11 @@ with tab1:
 
 
         st.dataframe(
-            df_rekap.style.applymap(
-                highlight_overcapacity, subset=["Status Warning"]
-            ),
-            use_container_width=True,
-        )
+    df_rekap.style.map(
+        highlight_overcapacity, subset=["Status Warning"]
+    ),
+    use_container_width=True,
+)
 
         total_overcapacity = (df_rekap["Status Warning"] == "OVERKAPASITAS").sum()
         if total_overcapacity > 0:
