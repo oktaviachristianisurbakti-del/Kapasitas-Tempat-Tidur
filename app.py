@@ -14,7 +14,7 @@ st.title(
     "🏥 Dashboard Audit Overkapasitas & Deteksi Backdate No Kunjungan (> 3 Hari Kerja)"
 )
 st.markdown(
-    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian serta mendeteksi nomor kunjungan yang terbit setelah 3 hari kerja."
+    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian, anomali nomor kunjungan, serta menyertakan ringkasan hasil analisis siap salin."
 )
 
 # Sidebar untuk Upload File Excel
@@ -71,39 +71,28 @@ if uploaded_file is not None:
             )
 
             # --- LOGIKA DETEKSI BACKDATE > 3 HARI KERJA BERDASARKAN URUTAN NOMOR ---
-            # 1. Hitung rata-rata pertumbuhan nomor urut per hari untuk setiap faskes
             df_temp = df_visits.dropna(subset=["Tgl_Datang_dt", "Nomor_Urut"])
             faskes_audit_results = []
 
             for faskes, group in df_temp.groupby("Nama Faskes"):
-                # Urutkan berdasarkan tanggal kedatangan
                 g_sorted = group.sort_values(by="Tgl_Datang_dt")
-
-                # Cari baseline: hitung rata-rata kenaikan nomor per hari
                 min_date = g_sorted["Tgl_Datang_dt"].min()
                 max_date = g_sorted["Tgl_Datang_dt"].max()
                 total_days = max(1, (max_date - min_date).days + 1)
 
-                # Estimasi kapasitas terbit harian rata-rata
                 total_kunjungan = len(g_sorted)
                 avg_per_day = max(1, total_kunjungan / total_days)
 
-                # Cek anomali: jika tanggal kedatangan jauh di masa lalu,
-                # tapi nomor urutnya masuk dalam kelompok nomor urut tinggi (yang seharusnya milik hari-hari berikutnya)
-                # Kita bandingkan tanggal actual dengan estimasi tanggal berdasarkan urutan nomor global faskes tersebut
                 g_sorted = g_sorted.sort_values(by="Nomor_Urut")
                 min_no = g_sorted["Nomor_Urut"].min()
 
                 for _, row in group.iterrows():
-                    # Estimasi selisih nomor dari nomor awal
                     selisih_nomor = row["Nomor_Urut"] - min_no
                     estimasi_hari_ke = selisih_nomor / avg_per_day
                     estimasi_tgl_terbit = min_date + timedelta(
                         days=int(estimasi_hari_ke)
                     )
 
-                    # Selisih hari antara Tanggal Terbit Estimasi dengan Tanggal Datang Actual
-                    # Jika Tanggal Datang jauh lebih lampau dibanding Tanggal Terbit Estimasi (> 3 hari)
                     selisih_hari_backdate = (
                         estimasi_tgl_terbit - row["Tgl_Datang_dt"]
                     ).days
@@ -183,6 +172,15 @@ if uploaded_file is not None:
 
             df_rekap = pd.DataFrame(rekap_list)
 
+            # Hitung metrik ringkasan analisis
+            total_overkap_days = (
+                df_rekap["Status Warning"] == "OVERKAPASITAS"
+            ).sum()
+            df_backdate_alert = df_visits[
+                df_visits["Status_Backdate_Audit"] != "Normal"
+            ]
+            total_backdate_cases = len(df_backdate_alert)
+
             # Tab Utama Aplikasi
             tab1, tab2, tab3 = st.tabs(
                 [
@@ -234,6 +232,17 @@ if uploaded_file is not None:
                     use_container_width=True,
                 )
 
+                # --- KOTAK RINGKASAN HASIL ANALISIS SIAP SALIN ---
+                st.markdown("---")
+                st.subheader("📝 Ringkasan Hasil Analisis Audit RITP")
+                summary_text = f"""
+                - **Total Titik Hari Overkapasitas Terdeteksi:** {total_overkap_days} hari
+                - **Total Indikasi Backdate Nomor Kunjungan (> 3 Hari Kerja):** {total_backdate_cases} kunjungan
+                - **Rekomendasi Audit:** Lakukan investigasi mendalam terhadap daftar nomor kunjungan pada tanggal-tanggal yang berstatus OVERKAPASITAS untuk mencegah celah *prolonged stay*. Periksa juga nomor kunjungan dengan label *backdate* di tab sebelah untuk memastikan validitas klaim.
+                """
+                st.info(summary_text)
+                # -----------------------------------------------
+
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine="openpyxl") as writer:
                     df_rekap.to_excel(
@@ -252,12 +261,8 @@ if uploaded_file is not None:
                 st.subheader(
                     "🔍 Investigasi Kunjungan dengan Indikasi Backdate (> 3 Hari Kerja)"
                 )
-                df_backdate_show = df_visits[
-                    df_visits["Status_Backdate_Audit"] != "Normal"
-                ]
-
                 st.markdown(
-                    f"Ditemukan **{len(df_backdate_show)}** kunjungan yang terindikasi dicetak/diterbitkan **lebih dari 3 hari kerja** setelah tanggal pelayanan berdasarkan analisis urutan nomor kunjungan."
+                    f"Ditemukan **{total_backdate_cases}** kunjungan yang terindikasi dicetak/diterbitkan **lebih dari 3 hari kerja** setelah tanggal pelayanan berdasarkan analisis urutan nomor kunjungan."
                 )
 
 
