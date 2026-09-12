@@ -1,19 +1,20 @@
 from datetime import datetime, timedelta
 import io
+import re
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Dashboard Overkapasitas & Audit RITP",
+    page_title="Dashboard Audit Overkapasitas & Anomali No Kunjungan",
     page_icon="🏥",
     layout="wide",
 )
 
 st.title(
-    "🏥 Dashboard Monitoring Overkapasitas & Audit Potensi Prolonged Stay RITP"
+    "🏥 Dashboard Audit Overkapasitas & Deteksi Backdate No Kunjungan (> 3 Hari Kerja)"
 )
 st.markdown(
-    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian serta melacak nomor kunjungan penyebabnya."
+    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian serta mendeteksi nomor kunjungan yang terbit setelah 3 hari kerja."
 )
 
 # Sidebar untuk Upload File Excel
@@ -22,12 +23,12 @@ uploaded_file = st.sidebar.file_uploader(
     "Pilih file Excel (.xlsx / .xls)", type=["xlsx", "xls"]
 )
 
-with st.sidebar.expander("ℹ️ Panduan Format Kolom"):
+with st.sidebar.expander("ℹ️ Panduan Format Kolom Excel"):
     st.markdown(
         """
         Pastikan file Excel Anda memiliki kolom:
         1. **Nama Faskes**
-        2. **No_Kunjungan**
+        2. **No_Kunjungan** (Nomor urut/kunjungan yang merefleksikan urutan terbit)
         3. **Tgl_Datang** (Format: YYYY-MM-DD)
         4. **Tgl_Pulang** (Format: YYYY-MM-DD)
         5. **Jumlah_TT**
@@ -58,9 +59,86 @@ if uploaded_file is not None:
                 df_visits["Tgl_Pulang"], errors="coerce"
             )
 
-            min_date = df_visits["Tgl_Datang_dt"].min()
-            max_date = df_visits["Tgl_Pulang_dt"].max()
-            all_dates = pd.date_range(start=min_date, end=max_date)
+
+            # Ekstrak angka dari No_Kunjungan
+            def extract_number(val):
+                numbers = re.findall(r"\d+", str(val))
+                return int(numbers[-1]) if numbers else 0
+
+
+            df_visits["Nomor_Urut"] = df_visits["No_Kunjungan"].apply(
+                extract_number
+            )
+
+            # --- LOGIKA DETEKSI BACKDATE > 3 HARI KERJA BERDASARKAN URUTAN NOMOR ---
+            # 1. Hitung rata-rata pertumbuhan nomor urut per hari untuk setiap faskes
+            df_temp = df_visits.dropna(subset=["Tgl_Datang_dt", "Nomor_Urut"])
+            faskes_audit_results = []
+
+            for faskes, group in df_temp.groupby("Nama Faskes"):
+                # Urutkan berdasarkan tanggal kedatangan
+                g_sorted = group.sort_values(by="Tgl_Datang_dt")
+
+                # Cari baseline: hitung rata-rata kenaikan nomor per hari
+                min_date = g_sorted["Tgl_Datang_dt"].min()
+                max_date = g_sorted["Tgl_Datang_dt"].max()
+                total_days = max(1, (max_date - min_date).days + 1)
+
+                # Estimasi kapasitas terbit harian rata-rata
+                total_kunjungan = len(g_sorted)
+                avg_per_day = max(1, total_kunjungan / total_days)
+
+                # Cek anomali: jika tanggal kedatangan jauh di masa lalu,
+                # tapi nomor urutnya masuk dalam kelompok nomor urut tinggi (yang seharusnya milik hari-hari berikutnya)
+                # Kita bandingkan tanggal actual dengan estimasi tanggal berdasarkan urutan nomor global faskes tersebut
+                g_sorted = g_sorted.sort_values(by="Nomor_Urut")
+                min_no = g_sorted["Nomor_Urut"].min()
+
+                for _, row in group.iterrows():
+                    # Estimasi selisih nomor dari nomor awal
+                    selisih_nomor = row["Nomor_Urut"] - min_no
+                    estimasi_hari_ke = selisih_nomor / avg_per_day
+                    estimasi_tgl_terbit = min_date + timedelta(
+                        days=int(estimasi_hari_ke)
+                    )
+
+                    # Selisih hari antara Tanggal Terbit Estimasi dengan Tanggal Datang Actual
+                    # Jika Tanggal Datang jauh lebih lampau dibanding Tanggal Terbit Estimasi (> 3 hari)
+                    selisih_hari_backdate = (
+                        estimasi_tgl_terbit - row["Tgl_Datang_dt"]
+                    ).days
+
+                    status_bk = (
+                        "⚠️ TERBIT > 3 HARI KERJA (BACKDATE)"
+                        if selisih_hari_backdate > 3
+                        else "Normal"
+                    )
+
+                    faskes_audit_results.append(
+                        {
+                            "Index": row.name,
+                            "Estimasi_Tgl_Terbit": estimasi_tgl_terbit.strftime(
+                                "%Y-%m-%d"
+                            ),
+                            "Estimasi_Selisih_Hari": selisih_hari_backdate,
+                            "Status_Backdate_Audit": status_bk,
+                        }
+                    )
+
+            df_audit_res = pd.DataFrame(faskes_audit_results).set_index(
+                "Index"
+            )
+            df_visits["Estimasi_Tgl_Terbit"] = df_audit_res[
+                "Estimasi_Tgl_Terbit"
+            ]
+            df_visits["Status_Backdate_Audit"] = df_audit_res[
+                "Status_Backdate_Audit"
+            ].fillna("Normal")
+
+            # --- KALKULASI OVERKAPASITAS HARIAN ---
+            min_date_all = df_visits["Tgl_Datang_dt"].min()
+            max_date_all = df_visits["Tgl_Pulang_dt"].max()
+            all_dates = pd.date_range(start=min_date_all, end=max_date_all)
 
             rekap_list = []
             faskes_groups = df_visits.groupby("Nama Faskes")
@@ -70,23 +148,19 @@ if uploaded_file is not None:
                 for d in all_dates:
                     d_str = d.strftime("%Y-%m-%d")
 
-                    # Sensus Pasien Dirawat (Datang <= d <= Pulang)
                     sensus_mask = (group["Tgl_Datang_dt"] <= d) & (
                         group["Tgl_Pulang_dt"] >= d
                     )
                     pasien_dirawat_df = group[sensus_mask]
                     pasien_dirawat_count = int(pasien_dirawat_df.shape[0])
 
-                    # Ambil daftar No Kunjungan yang sedang dirawat pada tanggal tersebut
                     list_no_kunjungan = ", ".join(
                         pasien_dirawat_df["No_Kunjungan"].astype(str).tolist()
                     )
 
-                    # Pasien Pulang pada tanggal d
                     pulang_mask = group["Tgl_Pulang_dt"] == d
                     pasien_pulang_count = int(pulang_mask.sum())
 
-                    # Logika: Jumlah TT + Pasien Pulang - Pasien Dirawat
                     sisa_kapasitas = (
                         max_tt + pasien_pulang_count - pasien_dirawat_count
                     )
@@ -103,26 +177,24 @@ if uploaded_file is not None:
                             "Pasien Pulang": pasien_pulang_count,
                             "Sisa Kapasitas": sisa_kapasitas,
                             "Status Warning": status,
-                            "No Kunjungan Dirawat (Potensi Audit)": list_no_kunjungan,
+                            "No Kunjungan Dirawat": list_no_kunjungan,
                         }
                     )
 
             df_rekap = pd.DataFrame(rekap_list)
 
             # Tab Utama Aplikasi
-            tab1, tab2 = st.tabs(
+            tab1, tab2, tab3 = st.tabs(
                 [
-                    "📊 Dashboard & Audit Warning",
+                    "📊 Dashboard Rekap Overkapasitas",
+                    "🔍 Audit Backdate No Kunjungan (> 3 Hari)",
                     "📋 Database Kunjungan Mentah",
                 ]
             )
 
             with tab1:
-                st.subheader(
-                    "Analisis Pemanfaatan, Warning, & Penelusuran Kunjungan"
-                )
+                st.subheader("Analisis Pemanfaatan & Warning Overkapasitas Harian")
 
-                # --- AREA FILTER (Faskes & Status Warning) ---
                 col_f1, col_f2 = st.columns(2)
                 with col_f1:
                     selected_faskes = st.selectbox(
@@ -145,7 +217,6 @@ if uploaded_file is not None:
                     df_display = df_display[
                         df_display["Status Warning"] == selected_status
                     ]
-                # ---------------------------------------------
 
 
                 def highlight_overcapacity(val):
@@ -163,7 +234,6 @@ if uploaded_file is not None:
                     use_container_width=True,
                 )
 
-                # Tombol Download Excel Rekap
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine="openpyxl") as writer:
                     df_rekap.to_excel(
@@ -172,30 +242,50 @@ if uploaded_file is not None:
                 excel_data = output.getvalue()
 
                 st.download_button(
-                    label="📥 Download Laporan Audit Lengkap (Excel)",
+                    label="📥 Download Laporan Audit Overkapasitas (Excel)",
                     data=excel_data,
                     file_name="Laporan_Audit_Overkapasitas_RITP.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
-                # Ringkasan Alert Audit
-                total_overcapacity = (
-                    df_rekap["Status Warning"] == "OVERKAPASITAS"
-                ).sum()
-                if total_overcapacity > 0:
-                    st.error(
-                        f"⚠️ Peringatan Audit! Terdeteksi {total_overcapacity} titik hari overkapasitas yang berisiko menjadi celah prolonged stay."
-                    )
-                else:
-                    st.success(
-                        "✅ Aman! Tidak ada indikasi overkapasitas pada periode ini."
+            with tab2:
+                st.subheader(
+                    "🔍 Investigasi Kunjungan dengan Indikasi Backdate (> 3 Hari Kerja)"
+                )
+                df_backdate_show = df_visits[
+                    df_visits["Status_Backdate_Audit"] != "Normal"
+                ]
+
+                st.markdown(
+                    f"Ditemukan **{len(df_backdate_show)}** kunjungan yang terindikasi dicetak/diterbitkan **lebih dari 3 hari kerja** setelah tanggal pelayanan berdasarkan analisis urutan nomor kunjungan."
+                )
+
+
+                def highlight_backdate_alert(val):
+                    return (
+                        "background-color: #ffc107; color: black; font-weight: bold;"
+                        if "BACKDATE" in str(val)
+                        else ""
                     )
 
-            with tab2:
+
+                st.dataframe(
+                    df_visits.style.map(
+                        highlight_backdate_alert,
+                        subset=["Status_Backdate_Audit"],
+                    ),
+                    use_container_width=True,
+                )
+
+            with tab3:
                 st.subheader("Data Mentah Kunjungan Faskes")
                 st.dataframe(
                     df_visits.drop(
-                        columns=["Tgl_Datang_dt", "Tgl_Pulang_dt"],
+                        columns=[
+                            "Tgl_Datang_dt",
+                            "Tgl_Pulang_dt",
+                            "Nomor_Urut",
+                        ],
                         errors="ignore",
                     ),
                     use_container_width=True,
