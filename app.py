@@ -14,7 +14,7 @@ st.title(
     "🏥 Dashboard Audit Overkapasitas & Deteksi Backdate No Kunjungan (> 3 Hari Kerja)"
 )
 st.markdown(
-    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian, anomali nomor kunjungan, serta menyertakan ringkasan hasil analisis siap salin."
+    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian, anomali nomor kunjungan, serta unduh hasil audit siap pakai."
 )
 
 # Sidebar untuk Upload File Excel
@@ -232,16 +232,15 @@ if uploaded_file is not None:
                     use_container_width=True,
                 )
 
-                # --- KOTAK RINGKASAN HASIL ANALISIS SIAP SALIN ---
+                # Kotak Ringkasan Hasil Analisis Siap Salin
                 st.markdown("---")
                 st.subheader("📝 Ringkasan Hasil Analisis Audit RITP")
                 summary_text = f"""
                 - **Total Titik Hari Overkapasitas Terdeteksi:** {total_overkap_days} hari
                 - **Total Indikasi Backdate Nomor Kunjungan (> 3 Hari Kerja):** {total_backdate_cases} kunjungan
-                - **Rekomendasi Audit:** Lakukan investigasi mendalam terhadap daftar nomor kunjungan pada tanggal-tanggal yang berstatus OVERKAPASITAS untuk mencegah celah *prolonged stay*. Periksa juga nomor kunjungan dengan label *backdate* di tab sebelah untuk memastikan validitas klaim.
+                - **Rekomendasi Audit:** Lakukan investigasi mendalam terhadap daftar nomor kunjungan pada tanggal-tanggal yang berstatus OVERKAPASITAS untuk mencegah celah *prolonged stay*. Periksa juga daftar kunjungan berlabel backdate di tab kedua.
                 """
                 st.info(summary_text)
-                # -----------------------------------------------
 
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -274,6 +273,7 @@ if uploaded_file is not None:
                     )
 
 
+                # Tampilkan tabel yang bisa di-copy langsung
                 st.dataframe(
                     df_visits.style.map(
                         highlight_backdate_alert,
@@ -281,6 +281,22 @@ if uploaded_file is not None:
                     ),
                     use_container_width=True,
                 )
+
+                # --- TOMBOL DOWNLOAD KHUSUS TABEL BACKDATE ---
+                output_bk = io.BytesIO()
+                with pd.ExcelWriter(output_bk, engine="openpyxl") as writer_bk:
+                    df_visits.to_excel(
+                        writer_bk, index=False, sheet_name="Audit Backdate No Kunjungan"
+                    )
+                excel_data_bk = output_bk.getvalue()
+
+                st.download_button(
+                    label="📥 Download Laporan Audit Backdate (Excel)",
+                    data=excel_data_bk,
+                    file_name="Laporan_Audit_Backdate_No_Kunjungan.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+                # ---------------------------------------------
 
             with tab3:
                 st.subheader("Data Mentah Kunjungan Faskes")
