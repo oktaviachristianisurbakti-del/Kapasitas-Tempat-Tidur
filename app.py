@@ -14,7 +14,7 @@ st.title(
     "🏥 Dashboard Audit Overkapasitas & Deteksi Backdate No Kunjungan (> 3 Hari Kerja)"
 )
 st.markdown(
-    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian dan anomali nomor kunjungan berdasarkan urutan kronologis nomor SJP."
+    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian dan anomali nomor kunjungan dengan penjelasan audit yang detail."
 )
 
 # Sidebar untuk Upload File Excel
@@ -70,42 +70,47 @@ if uploaded_file is not None:
                 extract_number
             )
 
-            # --- LOGIKA DETEKSI BACKDATE BERDASARKAN URUTAN NOMOR SJP ---
-            # Prinsip: Nomor urut kecil tidak boleh datang di tanggal yang jauh lebih lampau
-            # dibandingkan nomor urut yang lebih besar di sekitarnya (mengindikasikan backdate/sisipan).
+            # --- LOGIKA AUDIT BACKDATE DENGAN KETERANGAN DETAIL ---
             audit_results = []
 
             for faskes, group in df_visits.groupby("Nama Faskes"):
-                # Urutkan berdasarkan Nomor Urut secara menaik (ascending)
                 g_sorted = group.sort_values(by="Nomor_Urut")
 
-                # Hitung rata-rata kenaikan nomor per hari untuk estimasi konversi selisih nomor ke hari
-                min_dt = group["Tgl_Datang_dt"].min()
-                max_dt = group["Tgl_Datang_dt"].max()
-                total_days = max(1, (max_dt - min_dt).days + 1)
-                avg_per_day = max(1, len(group) / total_days)
-
-                # Evaluasi tiap baris terhadap baris dengan nomor urut yang lebih besar
                 for i, row in g_sorted.iterrows():
                     current_no = row["Nomor_Urut"]
                     current_date = row["Tgl_Datang_dt"]
+                    current_no_str = str(row["No_Kunjungan"])
                     status_bk = "Normal"
                     estimasi_tgl = current_date
+                    keterangan_audit = "Sesuai urutan kronologis wajar."
 
                     # Bandingkan dengan nomor-nomor setelahnya (nomor lebih besar)
                     later_rows = g_sorted[g_sorted["Nomor_Urut"] > current_no]
 
                     if not later_rows.empty:
                         # Ambil tanggal minimum dari nomor-nomor yang lebih besar
-                        min_later_date = later_rows["Tgl_Datang_dt"].min()
+                        min_later_row = later_rows.loc[
+                            later_rows["Tgl_Datang_dt"].idxmin()
+                        ]
+                        min_later_date = min_later_row["Tgl_Datang_dt"]
+                        min_later_no = min_later_row["Nomor_Urut"]
+                        min_later_no_str = str(min_later_row["No_Kunjungan"])
 
-                        # Jika nomor lebih kecil tapi tanggal datangnya JAUH LEBIH LAMPAU
-                        # dari tanggal terbit nomor yang lebih besar (> 3 hari)
                         if current_date < min_later_date:
                             selisih_hari = (min_later_date - current_date).days
                             if selisih_hari > 3:
                                 status_bk = "⚠️ TERBIT > 3 HARI KERJA (BACKDATE)"
                                 estimasi_tgl = min_later_date
+                                keterangan_audit = (
+                                    f"Terindikasi Backdate: No Kunjungan {current_no_str} "
+                                    f"(Tgl Datang: {current_date.strftime('%Y-%m-%d')}) memiliki nomor urut lebih kecil "
+                                    f"tetapi baru terbit menyusul di tanggal {min_later_date.strftime('%Y-%m-%d')} "
+                                    f"mengikuti No Kunjungan {min_later_no_str}. Selisih keterlambatan {selisih_hari} hari (> 3 hari kerja)."
+                                )
+                            else:
+                                keterangan_audit = (
+                                    f"Normal: Selisih waktu {selisih_hari} hari (<= 3 hari kerja)."
+                                )
 
                     audit_results.append(
                         {
@@ -114,6 +119,7 @@ if uploaded_file is not None:
                                 "%Y-%m-%d"
                             ),
                             "Status_Backdate_Audit": status_bk,
+                            "Keterangan_Analisis": keterangan_audit,
                         }
                     )
 
@@ -124,6 +130,9 @@ if uploaded_file is not None:
             df_visits["Status_Backdate_Audit"] = df_audit_res[
                 "Status_Backdate_Audit"
             ].fillna("Normal")
+            df_visits["Keterangan_Analisis"] = df_audit_res[
+                "Keterangan_Analisis"
+            ].fillna("Sesuai urutan kronologis wajar.")
 
             # --- KALKULASI OVERKAPASITAS HARIAN ---
             min_date_all = df_visits["Tgl_Datang_dt"].min()
