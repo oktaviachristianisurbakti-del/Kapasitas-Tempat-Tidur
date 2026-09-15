@@ -14,7 +14,7 @@ st.title(
     "🏥 Dashboard Audit Overkapasitas & Deteksi Backdate No Kunjungan (> 3 Hari Kerja)"
 )
 st.markdown(
-    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian dan anomali nomor kunjungan berdasarkan urutan kronologis."
+    "Upload file Excel kunjungan FKTP untuk mendeteksi overkapasitas harian dan anomali nomor kunjungan."
 )
 
 # Sidebar untuk Upload File Excel
@@ -28,7 +28,7 @@ with st.sidebar.expander("ℹ️ Panduan Format Kolom Excel"):
         """
         Pastikan file Excel Anda memiliki kolom:
         1. **Nama Faskes**
-        2. **No_Kunjungan** (Nomor urut/kunjungan yang merefleksikan urutan terbit)
+        2. **No_Kunjungan** (Nomor urut/kunjungan)
         3. **Tgl_Datang** (Format: YYYY-MM-DD)
         4. **Tgl_Pulang** (Format: YYYY-MM-DD)
         5. **Jumlah_TT**
@@ -70,13 +70,11 @@ if uploaded_file is not None:
                 extract_number
             )
 
-            # --- LOGIKA AUDIT BACKDATE BERDASARKAN URUTAN KRONOLOGIS ---
-            # Kita bandingkan: jika Tanggal Datang lebih awal, tapi Nomor Urutnya
-            # melampaui batas nomor urut rata-rata hari-hari setelahnya (> 3 hari)
+            # --- LOGIKA AUDIT BACKDATE YANG DISEMPURNAKAN (TIDAK MELOMPAT JAUH) ---
             audit_results = []
 
             for faskes, group in df_visits.groupby("Nama Faskes"):
-                # Urutkan berdasarkan tanggal datang
+                # Hitung rata-rata kenaikan nomor per hari yang wajar
                 g_sorted = group.sort_values(by="Tgl_Datang_dt")
                 min_date = g_sorted["Tgl_Datang_dt"].min()
                 max_date = g_sorted["Tgl_Datang_dt"].max()
@@ -88,23 +86,29 @@ if uploaded_file is not None:
                     tgl_pasien = row["Tgl_Datang_dt"]
                     no_pasien = row["Nomor_Urut"]
 
-                    # Cari nomor minimum pada tanggal-tanggal setelah tgl_pasien
+                    # Cari data pada tanggal-tanggal setelah tgl_pasien
                     future_groups = group[group["Tgl_Datang_dt"] > tgl_pasien]
                     status_bk = "Normal"
                     estimasi_tgl = tgl_pasien
 
                     if not future_groups.empty:
                         min_future_no = future_groups["Nomor_Urut"].min()
-                        # Jika nomor pasien ini LEBIH BESAR dari nomor di masa depan, atau
-                        # selisih nomornya menunjukkan estimasi jeda > 3 hari
+                        # Jika nomor pasien ini LEBIH BESAR dari nomor di masa depan,
+                        # kita hitung jeda harinya dibatasi secara wajar terhadap rata-rata harian
                         if no_pasien > min_future_no:
                             selisih_nomor = no_pasien - min_future_no
                             jeda_hari = int(selisih_nomor / avg_per_day)
+
+                            # Batasi estimasi agar tidak melompat tidak wajar (misal maksimal jeda 30 hari dari tanggal datang)
+                            jeda_hari = min(jeda_hari, 30)
+
+                            estimasi_tgl = tgl_pasien + timedelta(
+                                days=jeda_hari
+                            )
                             if jeda_hari > 3:
                                 status_bk = "⚠️ TERBIT > 3 HARI KERJA (BACKDATE)"
-                                estimasi_tgl = tgl_pasien + timedelta(
-                                    days=jeda_hari
-                                )
+                            else:
+                                status_bk = "Normal"
 
                     audit_results.append(
                         {
